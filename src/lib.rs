@@ -189,14 +189,18 @@ impl CertificateResult {
 /// Certificate paths from `SSL_CERT_FILE` and/or `SSL_CERT_DIR`.
 struct CertPaths {
     file: Option<PathBuf>,
-    dir: Option<PathBuf>,
+    dir: Option<Vec<PathBuf>>,
 }
 
 impl CertPaths {
     fn from_env() -> Self {
         Self {
             file: env::var_os(ENV_CERT_FILE).map(PathBuf::from),
-            dir: env::var_os(ENV_CERT_DIR).map(PathBuf::from),
+            // Read `SSL_CERT_DIR`, split it on the platform delimiter (`:` on Unix, `;` on Windows),
+            // and return the entries as `PathBuf`s.
+            //
+            // See <https://docs.openssl.org/3.5/man1/openssl-rehash/#options>
+            dir: env::var_os(ENV_CERT_DIR).map(|val| env::split_paths(&val).collect()),
         }
     }
 
@@ -204,7 +208,7 @@ impl CertPaths {
     ///
     /// See [`load_certs_from_paths()`].
     fn load(&self) -> CertificateResult {
-        load_certs_from_paths(self.file.as_deref(), self.dir.as_deref())
+        load_certs_from_paths_internal(self.file.as_deref(), self.dir.as_deref().unwrap_or(&[]))
     }
 }
 
@@ -223,8 +227,20 @@ impl CertPaths {
 /// subject to the rules outlined above for `file`. The directory is not
 /// scanned recursively and may be empty.
 pub fn load_certs_from_paths(file: Option<&Path>, dir: Option<&Path>) -> CertificateResult {
+    load_certs_from_paths_internal(
+        file,
+        dir.map(|p| vec![p])
+            .as_deref()
+            .unwrap_or(&[]),
+    )
+}
+
+fn load_certs_from_paths_internal(
+    file: Option<&Path>,
+    dir: &[impl AsRef<Path>],
+) -> CertificateResult {
     let mut out = CertificateResult::default();
-    if file.is_none() && dir.is_none() {
+    if file.is_none() && dir.is_empty() {
         return out;
     }
 
@@ -232,8 +248,8 @@ pub fn load_certs_from_paths(file: Option<&Path>, dir: Option<&Path>) -> Certifi
         load_pem_certs(cert_file, &mut out);
     }
 
-    if let Some(cert_dir) = dir {
-        load_pem_certs_from_dir(cert_dir, &mut out);
+    for cert_dir in dir.iter() {
+        load_pem_certs_from_dir(cert_dir.as_ref(), &mut out);
     }
 
     out.certs
@@ -458,14 +474,14 @@ mod tests {
 
         let result = CertPaths {
             file: None,
-            dir: Some(dir_path.clone()),
+            dir: Some(vec![dir_path.clone()]),
         }
         .load();
         assert_eq!(result.certs.len(), 2);
 
         let result = CertPaths {
             file: Some(file_path),
-            dir: Some(dir_path),
+            dir: Some(vec![dir_path]),
         }
         .load();
         assert_eq!(result.certs.len(), 2);
@@ -519,7 +535,7 @@ mod tests {
 
         test_cert_paths_bad_perms(CertPaths {
             file: None,
-            dir: Some(temp_dir.path().into()),
+            dir: Some(vec![temp_dir.path().into()]),
         })
     }
 
